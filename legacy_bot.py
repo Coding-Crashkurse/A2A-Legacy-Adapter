@@ -1,4 +1,3 @@
-# legacy_bot_service.py
 import uvicorn
 from fastapi import FastAPI, Depends, Request
 from pydantic import BaseModel, Field

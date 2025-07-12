@@ -1,4 +1,3 @@
-# adapter_service.py
 import uvicorn
 import httpx
 from fastapi import FastAPI, Depends, Request
