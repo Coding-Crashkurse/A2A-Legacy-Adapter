@@ -1,6 +1,8 @@
+# adapter_service.py (Simplified)
+
 import uvicorn
 import httpx
-from fastapi import FastAPI, Depends, Request
+from fastapi import FastAPI
 from pydantic import BaseModel
 from typing import Generic, TypeVar, Literal
 
@@ -21,49 +23,35 @@ class JSONRPCResponse(BaseModel, Generic[T]):
     id: str | int | None = None
 
 
-async def get_jsonrpc_request(request: Request) -> JSONRPCRequest:
-    return JSONRPCRequest.model_validate(await request.json())
+LEGACY_BOT_URL = "http://localhost:8002/invoke"
+app = FastAPI(title="Adapter Service (Stateless)")
 
 
-LEGACY_BOT_URL = "http://localhost:8002/jsonrpc"
-app = FastAPI(title="Adapter Service (JSON-RPC)")
+def get_text_from_a2a_message(a2a_msg: dict) -> str:
+    """Extracts text from a single A2A message dictionary."""
+    for part in a2a_msg.get("parts", []):
+        if part.get("kind") == "text":
+            return part.get("text", "")
+    return ""
 
 
-def a2a_task_to_message_history(task_data: dict) -> list[dict]:
-    messages = []
-    if task_data.get("history"):
-        for a2a_msg in task_data["history"]:
-            text_content = ""
-            for part in a2a_msg.get("parts", []):
-                if part.get("kind") == "text":
-                    text_content = part.get("text", "")
-                    break
-            if not text_content:
-                continue
-
-            role = a2a_msg.get("role")
-            if role == "user":
-                messages.append({"role": "human", "content": text_content})
-            elif role == "agent":
-                messages.append({"role": "ai", "content": text_content})
-
-    return messages
-
-
-@app.post("/jsonrpc", response_model=JSONRPCResponse)
-async def jsonrpc_handler(rpc: JSONRPCRequest = Depends(get_jsonrpc_request)):
+@app.post("/forward", response_model=JSONRPCResponse)
+async def forward_handler(rpc: JSONRPCRequest):
     if rpc.method == "process_and_forward":
         print("🔄 [Adapter] 'process_and_forward' called.")
         try:
-            message_history = a2a_task_to_message_history(rpc.params["task"])
+            query = get_text_from_a2a_message(rpc.params["message"])
+            if not query:
+                raise ValueError("No text content found in A2A message.")
+
             async with httpx.AsyncClient() as client:
                 bot_request = JSONRPCRequest(
-                    method="invoke_rag_graph",
-                    params={"messages": message_history},
+                    method="invoke_rag",
+                    params={"query": query},
                     id=rpc.id,
                 ).model_dump(exclude_none=True)
 
-                print(f"🔄 [Adapter] Forwarding request to RAG Bot: {LEGACY_BOT_URL}")
+                print(f"🔄 [Adapter] Forwarding to RAG Bot: {LEGACY_BOT_URL}")
                 response = await client.post(
                     LEGACY_BOT_URL, json=bot_request, timeout=60.0
                 )
@@ -73,9 +61,9 @@ async def jsonrpc_handler(rpc: JSONRPCRequest = Depends(get_jsonrpc_request)):
                 if bot_response_data.get("error"):
                     raise Exception(f"RAG bot error: {bot_response_data['error']}")
 
-                final_result = bot_response_data.get("result")
-                return JSONRPCResponse(id=rpc.id, result=final_result)
-
+                return JSONRPCResponse(
+                    id=rpc.id, result=bot_response_data.get("result")
+                )
         except Exception as e:
             print(f"❌ [Adapter] Error: {e}")
             return JSONRPCResponse(id=rpc.id, error={"code": -32001, "message": str(e)})
@@ -86,5 +74,5 @@ async def jsonrpc_handler(rpc: JSONRPCRequest = Depends(get_jsonrpc_request)):
 
 
 if __name__ == "__main__":
-    print("Starting Adapter Service on http://localhost:8001")
+    print("🚀 Starting Adapter Service on http://localhost:8001")
     uvicorn.run(app, host="0.0.0.0", port=8001)

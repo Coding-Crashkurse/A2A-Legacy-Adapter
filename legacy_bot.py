@@ -1,5 +1,7 @@
+# legacy_bot_service.py (Simplified)
+
 import uvicorn
-from fastapi import FastAPI, Depends, Request
+from fastapi import FastAPI
 from pydantic import BaseModel, Field
 from typing import Generic, TypeVar, Literal, List
 from dotenv import load_dotenv
@@ -8,7 +10,7 @@ from langchain.schema import Document
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_community.vectorstores import Chroma
 from langchain import hub
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langgraph.graph import StateGraph, END
 from typing import TypedDict
@@ -16,26 +18,20 @@ from typing import TypedDict
 load_dotenv()
 
 embedding_function = OpenAIEmbeddings()
-
 docs = [
     Document(
-        page_content="Bella Vista is owned by Antonio Rossi, a renowned chef with over 20 years of experience in the culinary industry. He started Bella Vista to bring authentic Italian flavors to the community.",
+        page_content="Bella Vista is owned by Antonio Rossi...",
         metadata={"source": "owner.txt"},
     ),
     Document(
-        page_content="Bella Vista offers a range of dishes with prices that cater to various budgets. Appetizers start at $8, main courses range from $15 to $35, and desserts are priced between $6 and $12.",
+        page_content="Bella Vista offers a range of dishes...",
         metadata={"source": "dishes.txt"},
     ),
     Document(
-        page_content="Bella Vista is open from Monday to Sunday. Weekday hours are 11:00 AM to 10:00 PM, while weekend hours are extended from 11:00 AM to 11:00 PM.",
-        metadata={"source": "restaurant_info.txt"},
-    ),
-    Document(
-        page_content="Bella Vista offers a variety of menus including a lunch menu, dinner menu, and a special weekend brunch menu. The lunch menu features light Italian fare, the dinner menu offers a more extensive selection of traditional and contemporary dishes, and the brunch menu includes both classic breakfast items and Italian specialties.",
+        page_content="Bella Vista is open from Monday to Sunday...",
         metadata={"source": "restaurant_info.txt"},
     ),
 ]
-
 db = Chroma.from_documents(docs, embedding_function)
 retriever = db.as_retriever(search_kwargs={"k": 2})
 prompt = hub.pull("rlm/rag-prompt")
@@ -44,18 +40,20 @@ rag_chain = prompt | llm
 
 
 class AgentState(TypedDict):
-    messages: List[BaseMessage]
-    documents: List[Document]
+    messages: List
+    documents: List
     on_topic: str
 
 
 class GradeQuestion(BaseModel):
-    score: str = Field(description="Question is about the restaurant? 'yes' or 'no'")
+    score: str = Field(
+        description="Is the question about the restaurant? 'yes' or 'no'"
+    )
 
 
 def question_classifier(state: AgentState):
     question = state["messages"][-1].content
-    system = """You are a classifier. Is the user's question about Bella Vista restaurant (owner, prices, hours, menu)? Respond 'yes' or 'no'."""
+    system = "You are a classifier. Is the question about Bella Vista restaurant (owner, prices, hours, menu)? Respond 'yes' or 'no'."
     grade_prompt = ChatPromptTemplate.from_messages(
         [("system", system), ("human", "{question}")]
     )
@@ -72,16 +70,14 @@ def on_topic_router(state):
 
 
 def retrieve_docs(state):
-    question = state["messages"][-1].content
-    documents = retriever.invoke(question)
-    state["documents"] = documents
+    state["documents"] = retriever.invoke(state["messages"][-1].content)
     return state
 
 
 def generate_answer(state):
-    question = state["messages"][-1].content
-    documents = state["documents"]
-    generation = rag_chain.invoke({"context": documents, "question": question})
+    generation = rag_chain.invoke(
+        {"context": state["documents"], "question": state["messages"][-1].content}
+    )
     state["messages"].append(generation)
     return state
 
@@ -129,42 +125,22 @@ class JSONRPCResponse(BaseModel, Generic[T]):
     id: str | int | None = None
 
 
-async def get_jsonrpc_request(request: Request) -> JSONRPCRequest:
-    return JSONRPCRequest.model_validate(await request.json())
+app = FastAPI(title="RAG Legacy Bot Service (Stateless)")
 
 
-def deserialize_messages(messages_data: list[dict]) -> list[BaseMessage]:
-    messages = []
-    for msg_data in messages_data:
-        role = msg_data.get("role")
-        content = msg_data.get("content")
-        if role == "human":
-            messages.append(HumanMessage(content=content))
-        elif role == "ai":
-            messages.append(AIMessage(content=content))
-    return messages
-
-
-app = FastAPI(title="RAG Legacy Bot Service (JSON-RPC)")
-
-
-@app.post("/jsonrpc", response_model=JSONRPCResponse)
-async def jsonrpc_handler(rpc: JSONRPCRequest = Depends(get_jsonrpc_request)):
-    if rpc.method == "invoke_rag_graph":
-        print("🤖 [RAG Bot] 'invoke_rag_graph' called.")
+@app.post("/invoke", response_model=JSONRPCResponse)
+async def invoke_handler(rpc: JSONRPCRequest):
+    if rpc.method == "invoke_rag":
         try:
-            langchain_messages = deserialize_messages(rpc.params["messages"])
-            if not any(isinstance(msg, HumanMessage) for msg in langchain_messages):
-                raise ValueError("No human message found in request history.")
-
-            final_state = await rag_graph.ainvoke({"messages": langchain_messages})
-
+            print("🤖 [RAG Bot] 'invoke_rag' called.")
+            final_state = await rag_graph.ainvoke(
+                {"messages": [HumanMessage(content=rpc.params["query"])]}
+            )
             answer = final_state["messages"][-1].content
             documents = [
                 {"page_content": doc.page_content, "metadata": doc.metadata}
                 for doc in final_state.get("documents", [])
             ]
-
             return JSONRPCResponse(
                 id=rpc.id, result={"answer": answer, "documents": documents}
             )
@@ -178,5 +154,5 @@ async def jsonrpc_handler(rpc: JSONRPCRequest = Depends(get_jsonrpc_request)):
 
 
 if __name__ == "__main__":
-    print("Starting RAG Legacy Bot Service on http://localhost:8002")
+    print("🚀 Starting RAG Legacy Bot Service on http://localhost:8002")
     uvicorn.run(app, host="0.0.0.0", port=8002)
